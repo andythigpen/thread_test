@@ -1,8 +1,24 @@
 
-all: thread_test
+CC=gcc
+CFLAGS=-c -Wall
+LDFLAGS=-lpthread -lrt
 
-thread_test: main.o
-	gcc main.o -lpthread -lrt -o thread_test
+SOURCES=main.c 
+OBJECTS=$(SOURCES:.c=.o)
+EXECUTABLE=thread_test
 
-main.o: main.c
-	gcc -c main.c 
+.PHONY=tags
+
+all: $(SOURCES) $(EXECUTABLE)
+
+tags: $(SOURCES)
+	cscope -b $(SOURCES)
+
+$(EXECUTABLE): $(OBJECTS)
+	$(CC) $(LDFLAGS) $(OBJECTS) -o $@
+
+.c.o:
+	$(CC) $(CFLAGS) $< -o $@ 
+
+clean:
+	rm -f $(OBJECTS) $(EXECUTABLE)

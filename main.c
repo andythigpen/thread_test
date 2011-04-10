@@ -14,12 +14,28 @@ struct thread_args
 {
     int thread_id;
     int use_csv;
+    int use_abstime;
     clockid_t clock_id; 
 };
 
-void timespec_subtract( struct timespec *result, 
-                        struct timespec *time1, 
-                        struct timespec *time2 )
+void
+timespec_add( struct timespec *result,
+              struct timespec *time1,
+              struct timespec *time2 )
+{
+    /* Add the two times together. */
+    result->tv_sec = time1->tv_sec + time2->tv_sec;
+    result->tv_nsec = time1->tv_nsec + time2->tv_nsec;
+    if ( result->tv_nsec >= 1000000000L ) {        /* Carry? */
+        result->tv_sec++;  
+        result->tv_nsec = result->tv_nsec - 1000000000L;
+    }
+}
+
+void 
+timespec_subtract( struct timespec *result, 
+                   struct timespec *time1, 
+                   struct timespec *time2 )
 {
     /* Subtract the second time from the first. */
     if ((time1->tv_sec < time2->tv_sec) ||
@@ -37,45 +53,75 @@ void timespec_subtract( struct timespec *result,
     }
 }
 
-void *thread_test( void *targs )
+void *
+thread_test( void *targs )
 {
     struct thread_args *args = (struct thread_args *) targs;
     int tid = args->thread_id;
     struct timespec sleep, before, after, diff;
     int i;
-    unsigned long min, max, sum = 0;
+    unsigned long adjust, avg, min, max, sum = 0;
     sleep.tv_sec = 0;
-    sleep.tv_nsec = 10;
+    sleep.tv_nsec = 1;
 
     fprintf( stdout, "[%02d] Thread started.\n", tid );
+    for ( i = 0; i < NUM_TESTS; ++i ) {
+        struct timespec temp;
+        clock_gettime( args->clock_id, &before );
+        clock_gettime( args->clock_id, &temp );
+        clock_gettime( args->clock_id, &after );
+        timespec_subtract( &diff, &after, &before );
+        sum += diff.tv_nsec;
+    }
+    adjust = ( sum / NUM_TESTS ) << 1; 
+    fprintf( stdout, "[%02d] Adjustment for clock_gettime (x2): %9lu.\n", 
+             tid, adjust );
+
+    if ( !args->use_csv ) {
+        fprintf( stdout, "[%02d] |  Stat  |   Avg   |   Min   |   Max   |"
+                "  Diff  |  Range  |\n", tid );
+    }
     while ( sleep.tv_nsec < 100000000 ) {
         //fprintf( stdout, "[%02d] Testing sleep %luns.\n", 
         //         tid, sleep.tv_nsec );
-        sum = max = 0;
+        avg = sum = max = 0;
         min = ULONG_MAX;
         for ( i = 0; i < NUM_TESTS; ++i ) {
-            clock_gettime( args->clock_id, &before );
-            clock_nanosleep( args->clock_id, 0, &sleep, NULL );
-            clock_gettime( args->clock_id, &after );
-            timespec_subtract( &diff, &after, &before );
-            sum += diff.tv_nsec;
-            if ( diff.tv_nsec < min ) {
-                min = diff.tv_nsec;
+            if ( !args->use_abstime ) {
+                clock_gettime( args->clock_id, &before );
+                clock_nanosleep( args->clock_id, 0, &sleep, NULL );
+                clock_gettime( args->clock_id, &after );
             }
-            if ( diff.tv_nsec > max ) {
-                max = diff.tv_nsec;
+            else {
+                struct timespec wakeup_time;
+                clock_gettime( args->clock_id, &before );
+                timespec_add( &wakeup_time, &before, &sleep );
+                clock_nanosleep( args->clock_id, TIMER_ABSTIME, &wakeup_time, 
+                                 NULL );
+                clock_gettime( args->clock_id, &after );
+            }
+            timespec_subtract( &diff, &after, &before );
+            sum += diff.tv_nsec - adjust;
+            if ( diff.tv_nsec - adjust < min ) {
+                min = diff.tv_nsec - adjust;
+            }
+            if ( diff.tv_nsec - adjust > max ) {
+                max = diff.tv_nsec - adjust;
             }
             //fprintf( stdout, "[%02d] Difference: %lu.%09lu.\n", 
             //         tid, diff.tv_sec, diff.tv_nsec );
         }
         if ( args->use_csv ) {
-            fprintf( stdout, "[%02d] %9lu,%9lu,%9lu,%9lu\n", 
-                     tid, sleep.tv_nsec, sum / NUM_TESTS, min, max );
+            avg = sum / NUM_TESTS;
+            fprintf( stdout, "[%02d] %lu,%lu,%lu,%lu,%lu,%lu\n", 
+                     tid, sleep.tv_nsec, avg, min, max, avg - sleep.tv_nsec, 
+                     max - min );
         }
         else {
-            fprintf( stdout, "[%02d] Stats %9luns,  "
-                     "Avg: %9luns  Min: %9luns  Max: %9luns\n", 
-                     tid, sleep.tv_nsec, sum / NUM_TESTS, min, max );
+            avg = sum / NUM_TESTS;
+            fprintf( stdout, "[%02d] %9lu  %8lu  %8lu  %8lu  %7lu  %8lu\n", 
+                     tid, sleep.tv_nsec, avg, min, max, avg - sleep.tv_nsec,
+                     max - min );
         }
         sleep.tv_nsec *= 10;
     }
@@ -84,7 +130,8 @@ void *thread_test( void *targs )
     pthread_exit( NULL );
 }
 
-int print_clockres( clockid_t clock_id )
+int 
+print_clockres( clockid_t clock_id )
 {
     struct timespec res;
     int rc = clock_getres( clock_id, &res );
@@ -96,21 +143,24 @@ int print_clockres( clockid_t clock_id )
     return 0;
 }
 
-void print_usage( const char *basename ) 
+void 
+print_usage( const char *basename ) 
 {
-    fprintf( stderr, "Usage: %s [-f|-r|-o] [-m] [-p priority] [-n threads] [-c]\n", 
+    fprintf( stderr, "Usage: %s [-f|-r|-o] [-m] [-a] [-p priority] [-n threads] [-c]\n", 
              basename );
     fprintf( stderr, "Options:\n" );
     fprintf( stderr, "    -f  use FIFO scheduling\n" );
     fprintf( stderr, "    -r  use ROUND ROBIN scheduling\n" );
     fprintf( stderr, "    -o  use OTHER scheduling\n" );
     fprintf( stderr, "    -m  use MONOTONIC clock\n" );
+    fprintf( stderr, "    -a  use ABSTIME\n" );
     fprintf( stderr, "    -n  number of threads to run\n" );
     fprintf( stderr, "    -p  scheduling priority (FIFO or RR)\n" );
     fprintf( stderr, "    -c  print CSV format\n" );
 }
 
-int main( int argc, char* argv[] )
+int 
+main( int argc, char* argv[] )
 {
     pthread_t *threads;
     pthread_attr_t attr;
@@ -119,12 +169,13 @@ int main( int argc, char* argv[] )
     int num_threads = 1;
     int use_sched = 0, policy;
     int use_csv = 0;
+    int use_abstime = 0;
     int rc, i, c;
     void *status;
 
     opterr = 0;
     optind = 1;
-    while ( ( c = getopt( argc, argv, "cformp:n:" ) ) != -1 ) {
+    while ( ( c = getopt( argc, argv, "cformap:n:" ) ) != -1 ) {
         switch ( c )
         {
             case 'f':
@@ -156,13 +207,13 @@ int main( int argc, char* argv[] )
                 clock_id = CLOCK_MONOTONIC;
                 fprintf( stdout, "Using MONOTONIC clock.\n" );
                 break;
+            case 'a':
+                use_abstime = 1;
+                fprintf( stdout, "Using TIMER_ABSTIME.\n" );
+                break;
             case 'p':
-                if ( !use_sched ) {
-                    fprintf( stderr, "Must select a scheduling policy to "
-                             "specify a priority.\n" );
-                    exit( -1 );
-                }
                 param.sched_priority = atoi( optarg );
+                fprintf( stdout, "Using priority %d.\n", param.sched_priority );
                 break;
             case 'n':
                 num_threads = atoi( optarg );
@@ -178,6 +229,16 @@ int main( int argc, char* argv[] )
                 fprintf( stderr, "Unknown option '-%c'.\n", optopt );
                 exit( -1 );
         }
+    }
+
+    if ( !use_sched && param.sched_priority ) {
+        fprintf( stderr, "Must select a scheduling policy to "
+                 "specify a priority.\n" );
+        exit( -1 );
+    }
+    else if ( use_sched && !param.sched_priority ) {
+        fprintf( stderr, "Must specify a priority for FIFO or RR.\n" );
+        exit( -1 );
     }
 
     if ( print_clockres( CLOCK_REALTIME ) != 0 ) {
@@ -220,6 +281,7 @@ int main( int argc, char* argv[] )
         args->thread_id = i;
         args->use_csv = use_csv;
         args->clock_id = clock_id;
+        args->use_abstime = use_abstime;
         rc = pthread_create( &threads[i], &attr, thread_test, args );
         if ( rc ) {
             fprintf( stderr, "[%02d] pthread_create failed: %s.\n", 

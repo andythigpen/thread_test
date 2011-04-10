@@ -6,7 +6,7 @@
 
 #define MAX_ARGS    2
 #define MAX_THREADS 64
-#define NUM_TESTS   100
+#define NUM_TESTS   1000
 
 void timespec_subtract( struct timespec *result, 
                         struct timespec *time1, 
@@ -38,14 +38,14 @@ void *thread_test( void *threadid )
     sleep.tv_nsec = 10;
 
     fprintf( stdout, "[%02d] Thread started.\n", tid );
-    while ( sleep.tv_nsec < 1000000000 ) {
+    while ( sleep.tv_nsec < 100000000 ) {
         //fprintf( stdout, "[%02d] Testing sleep %luns.\n", 
         //         tid, sleep.tv_nsec );
         sum = max = 0;
         min = ULONG_MAX;
         for ( i = 0; i < NUM_TESTS; ++i ) {
             clock_gettime( CLOCK_REALTIME, &before );
-            clock_nanosleep( CLOCK_REALTIME, TIMER_ABSTIME, &sleep, NULL );
+            clock_nanosleep( CLOCK_REALTIME, 0, &sleep, NULL );
             clock_gettime( CLOCK_REALTIME, &after );
             timespec_subtract( &diff, &after, &before );
             sum += diff.tv_nsec;

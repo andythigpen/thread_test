@@ -1,11 +1,13 @@
-#include <ctype.h>
+#include <sys/types.h>
+#include <unistd.h>
+/* #include <ctype.h> */
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <pthread.h>
-#include <time.h>
 #include <limits.h>
 #include <string.h>
+#include <signal.h>
+#include <time.h>
 
 #define MAX_ARGS    2
 #define NUM_TESTS   1000
@@ -15,6 +17,7 @@ struct thread_args
     int thread_id;
     int use_csv;
     int use_abstime;
+    int use_timers;
     clockid_t clock_id; 
 };
 
@@ -53,6 +56,57 @@ timespec_subtract( struct timespec *result,
     }
 }
 
+void
+sighand( int signo, siginfo_t *siginfo, void *ucntxt )
+{
+    struct thread_args *args = (struct thread_args *)siginfo->si_ptr;
+    fprintf( stdout, "[%02d] Signal received.\n", args->thread_id );
+}
+
+void
+timer_test( struct thread_args *args )
+{
+    struct sigevent evp;
+    struct itimerspec its;
+    struct sigaction actions;
+    timer_t timer_id;
+
+    /* Setup timer event */
+    evp.sigev_notify = SIGEV_THREAD_ID;
+    evp.sigev_signo = SIGALRM;
+    evp.sigev_value.sival_ptr = (void *)args;
+    evp.sigev_notify_thread_id = gettid();
+
+    if ( timer_create( CLOCK_REALTIME, &evp, &timer_id ) < 0 ) {
+        perror( "timer_create failed" );
+        exit( -1 );
+    }
+
+    /* Setup signal action */
+    memset( &actions, 0, sizeof( actions ) );
+    sigemptyset( &actions.sa_mask );
+    actions.sa_flags = SA_SIGINFO;
+    actions.sa_sigaction = sighand;
+
+    if ( sigaction( SIGALRM, &actions, NULL ) < 0 ) {
+        perror( "sigaction failed." );
+        exit( -1 );
+    }
+
+    its.it_interval.tv_sec = 0;
+    its.it_interval.tv_nsec = 1;
+    while ( its.it_interval.tv_nsec < 100000000 ) {
+        /* turn on timer */
+        its.it_value = its.it_interval;
+        timer_settime( timer_id, 0, &its, NULL );
+
+        /* turn off timer */
+        timer.it_value.tv_nsec = 0;
+        timer_settime( timer_id, 0, &its, NULL );
+        its.it_interval.tv_nsec *= 10;
+    }
+}
+
 void *
 thread_test( void *targs )
 {
@@ -81,49 +135,54 @@ thread_test( void *targs )
         fprintf( stdout, "[%02d] |  Stat  |   Avg   |   Min   |   Max   |"
                 "  Diff  |  Range  |\n", tid );
     }
-    while ( sleep.tv_nsec < 100000000 ) {
-        //fprintf( stdout, "[%02d] Testing sleep %luns.\n", 
-        //         tid, sleep.tv_nsec );
-        avg = sum = max = 0;
-        min = ULONG_MAX;
-        for ( i = 0; i < NUM_TESTS; ++i ) {
-            if ( !args->use_abstime ) {
-                clock_gettime( args->clock_id, &before );
-                clock_nanosleep( args->clock_id, 0, &sleep, NULL );
-                clock_gettime( args->clock_id, &after );
+    if ( args->use_timers ) {
+        timer_test( args );
+    }
+    else {
+        while ( sleep.tv_nsec < 100000000 ) {
+            //fprintf( stdout, "[%02d] Testing sleep %luns.\n", 
+            //         tid, sleep.tv_nsec );
+            avg = sum = max = 0;
+            min = ULONG_MAX;
+            for ( i = 0; i < NUM_TESTS; ++i ) {
+                if ( !args->use_abstime ) {
+                    clock_gettime( args->clock_id, &before );
+                    clock_nanosleep( args->clock_id, 0, &sleep, NULL );
+                    clock_gettime( args->clock_id, &after );
+                }
+                else {
+                    struct timespec wakeup_time;
+                    clock_gettime( args->clock_id, &before );
+                    timespec_add( &wakeup_time, &before, &sleep );
+                    clock_nanosleep( args->clock_id, TIMER_ABSTIME, &wakeup_time, 
+                                     NULL );
+                    clock_gettime( args->clock_id, &after );
+                }
+                timespec_subtract( &diff, &after, &before );
+                sum += diff.tv_nsec - adjust;
+                if ( diff.tv_nsec - adjust < min ) {
+                    min = diff.tv_nsec - adjust;
+                }
+                if ( diff.tv_nsec - adjust > max ) {
+                    max = diff.tv_nsec - adjust;
+                }
+                //fprintf( stdout, "[%02d] Difference: %lu.%09lu.\n", 
+                //         tid, diff.tv_sec, diff.tv_nsec );
+            }
+            if ( args->use_csv ) {
+                avg = sum / NUM_TESTS;
+                fprintf( stdout, "[%02d] %lu,%lu,%lu,%lu,%lu,%lu\n", 
+                         tid, sleep.tv_nsec, avg, min, max, avg - sleep.tv_nsec, 
+                         max - min );
             }
             else {
-                struct timespec wakeup_time;
-                clock_gettime( args->clock_id, &before );
-                timespec_add( &wakeup_time, &before, &sleep );
-                clock_nanosleep( args->clock_id, TIMER_ABSTIME, &wakeup_time, 
-                                 NULL );
-                clock_gettime( args->clock_id, &after );
+                avg = sum / NUM_TESTS;
+                fprintf( stdout, "[%02d] %9lu  %8lu  %8lu  %8lu  %7lu  %8lu\n", 
+                         tid, sleep.tv_nsec, avg, min, max, avg - sleep.tv_nsec,
+                         max - min );
             }
-            timespec_subtract( &diff, &after, &before );
-            sum += diff.tv_nsec - adjust;
-            if ( diff.tv_nsec - adjust < min ) {
-                min = diff.tv_nsec - adjust;
-            }
-            if ( diff.tv_nsec - adjust > max ) {
-                max = diff.tv_nsec - adjust;
-            }
-            //fprintf( stdout, "[%02d] Difference: %lu.%09lu.\n", 
-            //         tid, diff.tv_sec, diff.tv_nsec );
+            sleep.tv_nsec *= 10;
         }
-        if ( args->use_csv ) {
-            avg = sum / NUM_TESTS;
-            fprintf( stdout, "[%02d] %lu,%lu,%lu,%lu,%lu,%lu\n", 
-                     tid, sleep.tv_nsec, avg, min, max, avg - sleep.tv_nsec, 
-                     max - min );
-        }
-        else {
-            avg = sum / NUM_TESTS;
-            fprintf( stdout, "[%02d] %9lu  %8lu  %8lu  %8lu  %7lu  %8lu\n", 
-                     tid, sleep.tv_nsec, avg, min, max, avg - sleep.tv_nsec,
-                     max - min );
-        }
-        sleep.tv_nsec *= 10;
     }
     fprintf( stdout, "[%02d] Thread exiting.\n", tid );
     free( targs );
@@ -146,12 +205,13 @@ print_clockres( clockid_t clock_id )
 void 
 print_usage( const char *basename ) 
 {
-    fprintf( stderr, "Usage: %s [-f|-r|-o] [-m] [-a] [-p priority] [-n threads] [-c]\n", 
+    fprintf( stderr, "Usage: %s [-f|-r|-o] [-t] [-m] [-a] [-p priority] [-n threads] [-c]\n", 
              basename );
     fprintf( stderr, "Options:\n" );
     fprintf( stderr, "    -f  use FIFO scheduling\n" );
     fprintf( stderr, "    -r  use ROUND ROBIN scheduling\n" );
     fprintf( stderr, "    -o  use OTHER scheduling\n" );
+    fprintf( stderr, "    -t  use timers instead of sleep\n" );
     fprintf( stderr, "    -m  use MONOTONIC clock\n" );
     fprintf( stderr, "    -a  use ABSTIME\n" );
     fprintf( stderr, "    -n  number of threads to run\n" );
@@ -170,12 +230,13 @@ main( int argc, char* argv[] )
     int use_sched = 0, policy;
     int use_csv = 0;
     int use_abstime = 0;
+    int use_timers = 0;
     int rc, i, c;
     void *status;
 
     opterr = 0;
     optind = 1;
-    while ( ( c = getopt( argc, argv, "cformap:n:" ) ) != -1 ) {
+    while ( ( c = getopt( argc, argv, "cfortmap:n:" ) ) != -1 ) {
         switch ( c )
         {
             case 'f':
@@ -199,6 +260,9 @@ main( int argc, char* argv[] )
                     policy = SCHED_OTHER;
                     fprintf( stdout, "Using OTHER scheduling.\n" );
                 }
+                break;
+            case 't':
+                use_timers = 1;
                 break;
             case 'c':
                 use_csv = 1;
@@ -282,6 +346,7 @@ main( int argc, char* argv[] )
         args->use_csv = use_csv;
         args->clock_id = clock_id;
         args->use_abstime = use_abstime;
+        args->use_timers = use_timers;
         rc = pthread_create( &threads[i], &attr, thread_test, args );
         if ( rc ) {
             fprintf( stderr, "[%02d] pthread_create failed: %s.\n", 
